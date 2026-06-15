@@ -22,10 +22,10 @@ export const config = {
 
   // Venice AI inference (OpenAI-compatible endpoint for agents)
   veniceApiKey:
-    process.env.VENICE_API_KEY ?? "sk-cd116f6df30bdd1a-eg4alz-416038a4",
+    process.env.VENICE_API_KEY ?? "",
   veniceBaseUrl:
-    process.env.VENICE_BASE_URL ?? "https://wkwkwk.denkhultech.com/v1",
-  veniceInferenceModel: process.env.VENICE_INFERENCE_MODEL ?? "cx/gpt-5.5",
+    process.env.VENICE_BASE_URL ?? "https://api.venice.ai/api/v1",
+  veniceInferenceModel: process.env.VENICE_INFERENCE_MODEL ?? "deepseek-v4-flash",
 } as const;
 
 /** Resolve the active viem chain from the configured chainId (single source of truth). */
