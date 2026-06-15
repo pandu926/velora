@@ -1,0 +1,232 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Agent {
+  id               String   @id
+  role             String
+  model            String
+  description      String
+  reputation       Float    @default(50)
+  lockedReputation Float    @default(0)
+  totalSessions    Int      @default(0)
+  correctCalls     Int      @default(0)
+  incorrectCalls   Int      @default(0)
+  accuracy         Float    @default(0)
+  isActive         Boolean  @default(true)
+  replacedAt       DateTime?
+  replacedBy       String?
+  evolutionCycle   Int      @default(0)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  votes             Vote[]
+  reputationHistory ReputationEvent[]
+  specializations   Specialization[]
+
+  @@map("agents")
+}
+
+model Specialization {
+  id         String @id @default(cuid())
+  agentId    String
+  domain     String
+  accuracy   Float  @default(0)
+  sampleSize Int    @default(0)
+  confidence Float  @default(0)
+
+  agent Agent @relation(fields: [agentId], references: [id])
+
+  @@unique([agentId, domain])
+  @@index([domain, accuracy])
+  @@map("specializations")
+}
+
+model Session {
+  id               String   @id @default(cuid())
+  proposal         String
+  proposalDomain   String
+  mode             String   @default("vote")
+  trigger          String?
+  triggerData      Json?
+  evidenceSnapshot Json?
+  challengeLog     Json?
+  convictionLog    Json?
+  executionResult  Json?
+  consensusReached Boolean  @default(false)
+  finalPercentage  Float?
+  weightedPercentage Float?
+  verdictAction    String?
+  orchestratorSummary String?
+  orchestratorModel String?
+  userAddress      String?  @map("user_address")
+  totalRounds      Int      @default(1)
+  createdAt        DateTime @default(now())
+
+  votes   Vote[]
+  outcome Outcome?
+  caseLaw CaseLaw?
+
+  @@index([userAddress])
+  @@map("sessions")
+}
+
+model Vote {
+  id            String  @id @default(cuid())
+  sessionId     String
+  agentId       String
+  vote          String
+  confidence    Float
+  reasoning     String
+  dataPayload   Json?
+  compositeRisk Float?
+  stakedAmount  Float   @default(0)
+  stakeLevel    String  @default("none")
+  wasCorrect    Boolean?
+  reputationDelta Float?
+
+  session Session @relation(fields: [sessionId], references: [id])
+  agent   Agent   @relation(fields: [agentId], references: [id])
+
+  @@unique([sessionId, agentId])
+  @@index([agentId, wasCorrect])
+  @@map("votes")
+}
+
+model Outcome {
+  id            String    @id @default(cuid())
+  sessionId     String    @unique
+  result        String
+  valueDelta    Float?
+  measuredAt    DateTime?
+  measureMethod String    @default("auto")
+  userOverride  Boolean   @default(false)
+  scheduledAt   DateTime
+  notes         String?
+  createdAt     DateTime  @default(now())
+
+  session Session @relation(fields: [sessionId], references: [id])
+
+  @@map("outcomes")
+}
+
+model CaseLaw {
+  id              String   @id @default(cuid())
+  sessionId       String   @unique
+  domain          String
+  protocol        String?
+  riskLevel       String
+  outcome         String?
+  marketCondition String?
+  lessonSummary   String?
+  tags            String[]
+  createdAt       DateTime @default(now())
+
+  session Session @relation(fields: [sessionId], references: [id])
+
+  @@index([domain, outcome])
+  @@index([riskLevel])
+  @@map("case_law")
+}
+
+model ReputationEvent {
+  id              String   @id @default(cuid())
+  agentId         String
+  sessionId       String?
+  delta           Float
+  reason          String
+  reputationAfter Float
+  breakdown       Json?
+  createdAt       DateTime @default(now())
+
+  agent Agent @relation(fields: [agentId], references: [id])
+
+  @@index([agentId, createdAt])
+  @@map("reputation_history")
+}
+
+model EvolutionEvent {
+  id                String   @id @default(cuid())
+  cycleNumber       Int
+  replacedAgentId   String
+  replacedModel     String
+  newAgentId        String
+  newModel          String
+  reason            String
+  performanceBefore Float
+  performanceAfter  Float?
+  createdAt         DateTime @default(now())
+
+  @@map("evolution_events")
+}
+
+model UserProfile {
+  id              String   @id @default(cuid())
+  walletAddress   String   @unique @map("wallet_address")
+  riskAppetite    String   @default("moderate") @map("risk_appetite")
+  maxPositionPct  Float    @default(25) @map("max_position_pct")
+  preferredChains String[] @default(["base"]) @map("preferred_chains")
+  aiProfile       Json?    @map("ai_profile")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  strategies      UserStrategy[]
+  activities      ActivityLog[]
+  portfolioState  PortfolioState?
+
+  @@map("user_profiles")
+}
+
+model UserStrategy {
+  id            String    @id @default(cuid())
+  userId        String    @map("user_id")
+  user          UserProfile @relation(fields: [userId], references: [id])
+  targetValue   Float     @map("target_value")
+  currentValue  Float     @map("current_value")
+  riskLevel     String    @map("risk_level")
+  timeframe     String    @default("6m")
+  delegationId  String?   @map("delegation_id")
+  plan          Json?
+  status        String    @default("stopped")
+  autoExecute   Boolean   @default(false) @map("auto_execute")
+  startedAt     DateTime? @map("started_at")
+  stoppedAt     DateTime? @map("stopped_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  @@index([userId, status])
+  @@map("user_strategies")
+}
+
+model PortfolioState {
+  id            String   @id @default(cuid())
+  userId        String   @unique @map("user_id")
+  user          UserProfile @relation(fields: [userId], references: [id])
+  totalValue    Float    @map("total_value")
+  allocations   Json
+  entryPrices   Json     @map("entry_prices")
+  realizedPnL   Float    @default(0) @map("realized_pnl")
+  dailyPnL      Float    @default(0) @map("daily_pnl")
+  lastUpdated   DateTime @updatedAt @map("last_updated")
+
+  @@map("portfolio_states")
+}
+
+model ActivityLog {
+  id            String   @id @default(cuid())
+  userId        String   @map("user_id")
+  user          UserProfile @relation(fields: [userId], references: [id])
+  type          String
+  message       String
+  data          Json?
+  sessionId     String?  @map("session_id")
+  txHash        String?  @map("tx_hash")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@index([userId, createdAt])
+  @@map("activity_logs")
+}

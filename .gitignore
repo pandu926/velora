@@ -1,0 +1,66 @@
+# Dependencies
+node_modules/
+
+# Environment & secrets
+.env
+.env.local
+.env.*.local
+backend/.env
+frontend/.env.local
+*.pem
+*.key
+
+# Build outputs
+dist/
+.next/
+out/
+*.tsbuildinfo
+frontend/.next/
+backend/dist/
+
+# Runtime data
+backend/data/delegations.json
+backend/data/court-transcripts/
+backend/data/learning-history.json
+
+# Generated Prisma client
+backend/src/generated/
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Testing artifacts
+.playwright-mcp/
+coverage/
+.nyc_output/
+
+# Docker runtime
+docker-compose.override.yml
+
+# Logs
+*.log
+logs/
+.pm2/
+
+# Claude Code / AI tools
+.claude/
+.planning/
+
+# Lock files (use pnpm-lock.yaml only)
+package-lock.json
+yarn.lock
+
+# Screenshots (dev only)
+*.png
+!frontend/public/*.png
+!frontend/public/logo.png
+!frontend/public/favicon.svg
+
+# Misc
+scenario-results.json
+/tmp/

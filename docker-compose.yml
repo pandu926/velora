@@ -1,0 +1,40 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: velora-backend
+    ports:
+      - "8931:8931"
+    environment:
+      - PORT=8931
+      - PRIVATE_KEY=${PRIVATE_KEY:-0x0000000000000000000000000000000000000000000000000000000000000001}
+      - RPC_URL=${RPC_URL:-https://sepolia.base.org}
+      - CHAIN_ID=84532
+      - ONESHOT_RELAYER_URL=https://relayer.1shotapi.com/relayers
+      - VENICE_PRIVATE_KEY=${VENICE_PRIVATE_KEY:-0x0000000000000000000000000000000000000000000000000000000000000001}
+      - VENICE_API_URL=https://api.venice.ai/api/v1
+      - VENICE_MODEL=zai-org-glm-5-1
+      - HERMES_API_KEY=${HERMES_API_KEY:-sk-cd116f6df30bdd1a-eg4alz-416038a4}
+      - HERMES_BASE_URL=https://wkwkwk.denkhultech.com/v1
+      - HERMES_MODEL=cx/gpt-5.5
+    volumes:
+      - velora-data:/app/data
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: velora-frontend
+    ports:
+      - "8930:8930"
+    environment:
+      - PORT=8930
+      - BACKEND_URL=http://backend:8931
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  velora-data:
