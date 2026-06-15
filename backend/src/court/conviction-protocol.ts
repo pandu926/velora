@@ -8,6 +8,8 @@ import {
   ORCHESTRATOR_MODEL,
   VENICE_BASE_URL,
   VENICE_API_KEY,
+  CHEAP_MODELS,
+  getNextFallback,
   type AgentVote,
   type BoardroomAgent,
   type BoardroomSession,
@@ -37,6 +39,20 @@ interface InitialStance {
   reasoning: string
   keyEvidence: string
   stake: StakeLevel
+  message?: string
+}
+
+interface ChatTimelineMessage {
+  agentId: string
+  role: string
+  model: string
+  type: 'stance' | 'flip' | 'hold' | 'verdict'
+  content: string
+  vote?: 'yes' | 'no'
+  confidence?: number
+  replyTo?: string
+  round?: number
+  timestamp: number
 }
 
 interface ChallengePair {
@@ -76,25 +92,54 @@ function sendSSE(res: Response, event: ConvictionEvent): void {
   res.write(`data: ${JSON.stringify(event)}\n\n`)
 }
 
-async function callModel(model: string, messages: ChatMessage[], temperature = 0.4): Promise<string> {
-  const response = await fetch(`${VENICE_BASE_URL}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${VENICE_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ model, messages, temperature, stream: false }),
-    signal: AbortSignal.timeout(30000),
-  })
+const FALLBACK_MODEL = 'deepseek-v4-flash'
 
-  if (!response.ok) {
-    const err = await response.text().catch(() => 'unknown')
-    throw new Error(`Model ${model} failed (${response.status}): ${err}`)
+async function callModel(model: string, messages: ChatMessage[], temperature = 0.4, usedModels?: Set<string>): Promise<{ content: string; actualModel: string }> {
+  const tried: string[] = []
+
+  const tryModel = async (m: string): Promise<string | null> => {
+    try {
+      const response = await fetch(`${VENICE_BASE_URL}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${VENICE_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ model: m, messages, temperature, stream: false }),
+        signal: AbortSignal.timeout(90000),
+      })
+
+      if (!response.ok) {
+        console.warn(`[callModel] ${m} failed (${response.status})`)
+        return null
+      }
+
+      const data = await response.json() as Record<string, unknown>
+      const choices = data.choices as Array<{ message?: { content?: string } }> | undefined
+      return choices?.[0]?.message?.content ?? null
+    } catch (e) {
+      console.warn(`[callModel] ${m} error: ${e instanceof Error ? e.message : 'unknown'}`)
+      return null
+    }
   }
 
-  const data = await response.json() as Record<string, unknown>
-  const choices = data.choices as Array<{ message?: { content?: string } }> | undefined
-  return choices?.[0]?.message?.content ?? ''
+  // Try primary model first
+  tried.push(model)
+  const primary = await tryModel(model)
+  if (primary) return { content: primary, actualModel: model }
+
+  // Rotate through fallbacks from pool, skip already-used models
+  const exclude = [...tried, ...(usedModels ? [...usedModels] : [])]
+  for (let i = 0; i < 5; i++) {
+    const fallback = getNextFallback(exclude)
+    if (!fallback) break
+    exclude.push(fallback)
+    tried.push(fallback)
+    const result = await tryModel(fallback)
+    if (result) return { content: result, actualModel: fallback }
+  }
+
+  throw new Error(`All models failed (tried: ${tried.join(', ')})`)
 }
 
 async function getPortfolioContext(userAddress?: string): Promise<Record<string, unknown>> {
@@ -201,6 +246,9 @@ export async function runConvictionProtocol(res: Response, proposal?: string, us
   const trimmedEvidence = evidenceStr.length > 3000 ? evidenceStr.slice(0, 3000) + '\n...(truncated)' : evidenceStr
 
   const stances: InitialStance[] = []
+  const usedModels = new Set<string>()
+  const chatMessages: ChatTimelineMessage[] = []
+
   for (const agent of agents) {
     const agentRep = agentReputationMap.get(agent.id) ?? { reputation: 50, locked: 0 }
     const stakingPromptText = stakingEngine.buildStakingPrompt(agentRep.reputation, agentRep.locked)
@@ -216,15 +264,19 @@ ${stakingPromptText}
 
 Give your INDEPENDENT position. Do NOT hedge. Take a clear stance.
 JSON only:
-{"vote":"yes"|"no","confidence":0.0-1.0,"reasoning":"[2-3 sentences with risk scores]","key_evidence":"[single most important data point]","stake":"none"|"low"|"high"|"all_in"}`
+{"vote":"yes"|"no","confidence":0.0-1.0,"reasoning":"[2-3 sentences with risk scores]","key_evidence":"[single most important data point]","stake":"none"|"low"|"high"|"all_in","message":"[Write 4-6 natural conversational sentences as if you are speaking in a group discussion with other analysts. Be opinionated, reference specific data from the evidence, explain your logic clearly. Write in first person. Do not use bullet points or headers.]"}`
 
     try {
-      const raw = await callModel(agent.model, [{ role: 'user', content: prompt }])
-      const stance = parseStance(raw, agent)
+      const { content: raw, actualModel } = await callModel(agent.model, [{ role: 'user', content: prompt }], 0.4, usedModels)
+      usedModels.add(actualModel)
+      const stance = parseStance(raw, { ...agent, model: actualModel })
+      chatMessages.push({ agentId: stance.agentId, role: stance.role, model: stance.model, type: 'stance', content: stance.message || stance.reasoning, vote: stance.vote, confidence: stance.confidence, timestamp: Date.now() })
       sendSSE(res, { type: 'stance', stance })
       stances.push(stance)
     } catch {
+      usedModels.add(agent.model)
       const stance: InitialStance = { agentId: agent.id, role: agent.role, model: agent.model, vote: 'no', confidence: 0, reasoning: 'Agent unavailable', keyEvidence: '', stake: 'none' }
+      chatMessages.push({ agentId: agent.id, role: agent.role, model: agent.model, type: 'stance', content: 'Agent unavailable — could not reach model in time.', vote: 'no', confidence: 0, timestamp: Date.now() })
       sendSSE(res, { type: 'stance', stance })
       stances.push(stance)
     }
@@ -280,12 +332,15 @@ Reconsider honestly. You may:
 - FLIP: Change your vote. The majority's arguments are more compelling.
 - HOLD: Maintain your position. Explain why you disagree despite majority pressure.
 
-JSON only: {"decision":"hold"|"flip","reasoning":"[1-2 sentences]"}`
+JSON only: {"decision":"hold"|"flip","reasoning":"[1-2 sentences]","message":"[Write 3-5 natural conversational sentences responding to the majority arguments. Address specific points they made. If you flip, explain what convinced you. If you hold, explain why their arguments fail to sway you. First person, conversational, like you are replying in a group chat.]"}`
 
       try {
-        const raw = await callModel(agentDef.model, [{ role: 'user', content: prompt }])
+        const { content: raw } = await callModel(minorityStance.model, [{ role: 'user', content: prompt }], 0.4, usedModels)
         const result = parseReconsideration(raw)
         sendSSE(res, { type: 'reconsider', agentId: minorityStance.agentId, decision: result.decision, reasoning: result.reasoning, round })
+
+        const majorityLeader = majority[0]?.agentId
+        chatMessages.push({ agentId: minorityStance.agentId, role: minorityStance.role, model: minorityStance.model, type: result.decision === 'flip' ? 'flip' : 'hold', content: result.message || result.reasoning, replyTo: majorityLeader, round, timestamp: Date.now() })
 
         if (result.decision === 'flip') {
           const idx = currentStances.findIndex(s => s.agentId === minorityStance.agentId)
@@ -296,6 +351,7 @@ JSON only: {"decision":"hold"|"flip","reasoning":"[1-2 sentences]"}`
         }
       } catch {
         sendSSE(res, { type: 'reconsider', agentId: minorityStance.agentId, decision: 'hold', reasoning: 'Failed to process — maintaining position', round })
+        chatMessages.push({ agentId: minorityStance.agentId, role: minorityStance.role, model: minorityStance.model, type: 'hold', content: 'I maintain my position — could not process the majority arguments in time.', replyTo: majority[0]?.agentId, round, timestamp: Date.now() })
         roundHolds.push(minorityStance.agentId)
       }
     }
@@ -324,6 +380,8 @@ JSON only: {"decision":"hold"|"flip","reasoning":"[1-2 sentences]"}`
   sendSSE(res, { type: 'phase', phase: 'orchestrating' })
 
   const orchestratorResult = await orchestratorVerdict(res, currentStances, [], [], evidence, activeProposal, weightedPercentage)
+
+  chatMessages.push({ agentId: 'venice-orchestrator', role: 'Venice AI Judge', model: 'venice-orchestrator', type: 'verdict', content: orchestratorResult.summary, vote: approved ? 'yes' : 'no', confidence: weightedPercentage, timestamp: Date.now() })
 
   const verdict: BoardroomVerdict = {
     action: orchestratorResult.action,
@@ -374,7 +432,7 @@ JSON only: {"decision":"hold"|"flip","reasoning":"[1-2 sentences]"}`
     await prisma.session.update({
       where: { id: sessionId },
       data: {
-        convictionLog: { initialStances: stances, rounds: roundHistory, finalStances: currentStances, totalRounds } as unknown as object,
+        convictionLog: { initialStances: stances, rounds: roundHistory, finalStances: currentStances, totalRounds, chatMessages } as unknown as object,
         trigger: (evidence['_trigger'] as string) ?? null,
         triggerData: (evidence['_triggerData'] as object) ?? null,
       },
@@ -401,6 +459,7 @@ function parseStance(raw: string, agent: BoardroomAgent): InitialStance {
       reasoning: typeof parsed.reasoning === 'string' ? parsed.reasoning : '',
       keyEvidence: typeof parsed.key_evidence === 'string' ? parsed.key_evidence : '',
       stake: stakingEngine.parseStakeLevel(typeof parsed.stake === 'string' ? parsed.stake : 'none'),
+      message: typeof parsed.message === 'string' ? parsed.message : undefined,
     }
   } catch {
     const hasYes = raw.toLowerCase().includes('"vote":"yes"') || raw.toLowerCase().includes('"vote": "yes"')
@@ -451,7 +510,7 @@ interface PairSetup {
   defenderId: string
 }
 
-function parseReconsideration(raw: string): { decision: 'hold' | 'flip'; reasoning: string } {
+function parseReconsideration(raw: string): { decision: 'hold' | 'flip'; reasoning: string; message?: string } {
   try {
     const cleaned = raw.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim()
     const jsonMatch = cleaned.match(/\{[\s\S]*"decision"[\s\S]*\}/)
@@ -460,6 +519,7 @@ function parseReconsideration(raw: string): { decision: 'hold' | 'flip'; reasoni
     return {
       decision: parsed.decision === 'flip' ? 'flip' : 'hold',
       reasoning: typeof parsed.reasoning === 'string' ? parsed.reasoning.slice(0, 200) : 'No reasoning provided',
+      message: typeof parsed.message === 'string' ? parsed.message : undefined,
     }
   } catch {
     return { decision: 'hold', reasoning: 'Failed to process — maintaining position' }
@@ -503,8 +563,8 @@ Respond in 2-3 sentences. No JSON — direct argument only.`
 
   let challengeArgument: string
   try {
-    challengeArgument = await callModel(challengerAgent.model, [{ role: 'user', content: challengePrompt }])
-    challengeArgument = challengeArgument.slice(0, 300)
+    const { content } = await callModel(challengerAgent.model, [{ role: 'user', content: challengePrompt }])
+    challengeArgument = content.slice(0, 300)
   } catch {
     challengeArgument = `Challenge unavailable from ${challengerAgent.role}`
   }
@@ -519,8 +579,8 @@ Respond in 2-3 sentences. No JSON — direct defense only.`
 
   let defenseResponse: string
   try {
-    defenseResponse = await callModel(defenderAgent.model, [{ role: 'user', content: defensePrompt }])
-    defenseResponse = defenseResponse.slice(0, 300)
+    const { content } = await callModel(defenderAgent.model, [{ role: 'user', content: defensePrompt }])
+    defenseResponse = content.slice(0, 300)
   } catch {
     defenseResponse = `Defense unavailable from ${defenderAgent.role}`
   }

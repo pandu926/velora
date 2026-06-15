@@ -135,6 +135,9 @@ router.get('/:id', async (req: Request, res: Response) => {
       // Full conviction locks
       convictions: session.convictionLog ?? [],
 
+      // Chat timeline (WhatsApp-style replay)
+      chatMessages: (session.convictionLog as Record<string, unknown>)?.chatMessages ?? null,
+
       // Execution result
       execution: session.executionResult,
 
